@@ -40,6 +40,14 @@
             gap: 8px;
             font-size: 1.3rem;
         }
+        .stats {
+            display: flex;
+            gap: 12px;
+            background: #1e2a1c;
+            padding: 6px 14px;
+            border-radius: 40px;
+            font-size: 12px;
+        }
         .status {
             background: #1e2a1c;
             padding: 6px 14px;
@@ -76,6 +84,7 @@
         }
         @media (max-width: 550px) {
             .panel { flex-direction: column; align-items: stretch; }
+            .stats { justify-content: center; }
         }
     </style>
 </head>
@@ -85,9 +94,12 @@
 
 <div class="panel">
     <div class="score">
-        <span>🍄</span>
-        <span id="mushroomCount">0</span>
-        <span style="font-size: 0.8rem;">очков</span>
+        <span>🧺</span>
+        <span id="totalScore">0</span>
+    </div>
+    <div class="stats">
+        <span>🟤 <span id="whiteCount">0</span></span>
+        <span>🔴🍄 <span id="amanitaCount">0</span></span>
     </div>
     <div class="status">
         <span class="led" id="gpsLed"></span>
@@ -106,20 +118,30 @@
     let watchId = null;
     let currentLocation = null;
     let mushrooms = [];
-    let score = 0;
     let nextId = 1;
     
+    // Статистика
+    let whiteCollected = 0;    // 🟤
+    let amanitaCollected = 0;   // 🔴🍄
+    let totalScore = 0;
+    
+    // Параметры генерации
     const COLLECT_RADIUS = 25;        // метров для сбора
     const MIN_DIST = 20;              // минимальное расстояние до гриба
     const MAX_DIST = 100;             // максимальное расстояние до гриба
-    const DESIRED_MUSHROOMS = 10;     // всегда 10 грибов на карте
+    const FAR_DIST = 150;             // если гриб дальше 150м — удалить и создать новый
+    const DESIRED_MUSHROOMS = 20;      // всего грибов на карте
+    const START_RADIUS = 400;          // радиус разброса при старте (метры)
+    
+    // Таймер перерисовки
+    let cleanupTimer = null;
     
     let crunchAudio = null;
     let audioEnabled = false;
     
     // ----- КАРТА -----
     function initMap() {
-        map = L.map('map').setView([55.751244, 37.618423], 16);
+        map = L.map('map').setView([55.751244, 37.618423], 15);
         L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
             attribution: '&copy; OSM',
             subdomains: 'abcd',
@@ -127,24 +149,24 @@
         }).addTo(map);
     }
     
-    // ----- ИКОНКИ (ПРАВИЛЬНЫЕ) -----
-    // Белый гриб (коричневая шляпка)
+    // ----- ИКОНКИ -----
+    // Белый гриб (коричневый кружок) + цифра +1
     function getWhiteIcon() {
         return L.divIcon({
-            html: `<div style="font-size: 34px; filter: drop-shadow(2px 2px 3px rgba(0,0,0,0.5)); text-align: center;">🍄</div>`,
-            iconSize: [34, 34],
+            html: `<div style="background-color: #8B5A2B; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 14px; border: 2px solid #D4A76A; box-shadow: 0 2px 6px black;">+1</div>`,
+            iconSize: [32, 32],
             className: 'white-mush',
-            popupAnchor: [0, -15]
+            popupAnchor: [0, -16]
         });
     }
     
-    // Мухомор (красный с точками)
+    // Мухомор (красный гриб) + цифра -1
     function getAmanitaIcon() {
         return L.divIcon({
-            html: `<div style="font-size: 34px; filter: drop-shadow(2px 2px 3px rgba(0,0,0,0.5)); text-align: center;">🍄</div>`,
-            iconSize: [34, 34],
+            html: `<div style="background-color: #CC0000; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 14px; border: 2px solid #FF6666; box-shadow: 0 2px 6px black;">-1</div>`,
+            iconSize: [32, 32],
             className: 'amanita-mush',
-            popupAnchor: [0, -15]
+            popupAnchor: [0, -16]
         });
     }
     
@@ -155,59 +177,7 @@
         });
     }
     
-    // ----- ГЕНЕРАЦИЯ ГРИБА В РАДИУСЕ ОТ ИГРОКА -----
-    function generateMushroomNear(lat, lng) {
-        // Случайное расстояние от 20 до 100 метров
-        const dist = MIN_DIST + Math.random() * (MAX_DIST - MIN_DIST);
-        // Случайный угол
-        const angle = Math.random() * 2 * Math.PI;
-        // Переводим метры в градусы
-        const deltaLat = (dist * Math.cos(angle)) / 111320;
-        const deltaLng = (dist * Math.sin(angle)) / (111320 * Math.cos(lat * Math.PI/180));
-        
-        let newLat = lat + deltaLat;
-        let newLng = lng + deltaLng;
-        
-        // Ограничиваем координаты
-        newLat = Math.min(90, Math.max(-90, newLat));
-        newLng = Math.min(180, Math.max(-180, newLng));
-        
-        // 30% шанс мухомора, 70% белый
-        const isAmanita = Math.random() < 0.3;
-        
-        return { 
-            lat: newLat, 
-            lng: newLng, 
-            type: isAmanita ? 'amanita' : 'white' 
-        };
-    }
-    
-    function addMushroom(lat, lng, type) {
-        const icon = type === 'white' ? getWhiteIcon() : getAmanitaIcon();
-        const marker = L.marker([lat, lng], { icon }).addTo(map);
-        const popupText = type === 'white' ? '🍄 Белый гриб! +1 очко' : '🔴 МУХОМОР! -1 очко';
-        marker.bindPopup(popupText);
-        mushrooms.push({ id: nextId++, marker, lat, lng, type });
-    }
-    
-    function removeMushroom(m) {
-        if (m.marker) map.removeLayer(m.marker);
-        const idx = mushrooms.findIndex(x => x.id === m.id);
-        if (idx !== -1) mushrooms.splice(idx, 1);
-    }
-    
-    // Поддержание количества грибов (всегда DESIRED_MUSHROOMS штук)
-    function replenishMushrooms(lat, lng) {
-        if (!lat || !lng) return;
-        
-        let needed = DESIRED_MUSHROOMS - mushrooms.length;
-        for (let i = 0; i < needed; i++) {
-            let mush = generateMushroomNear(lat, lng);
-            addMushroom(mush.lat, mush.lng, mush.type);
-        }
-    }
-    
-    // ----- РАССТОЯНИЕ МЕЖДУ ТОЧКАМИ (метры) -----
+    // ----- РАССТОЯНИЕ (метры) -----
     function distance(lat1, lng1, lat2, lng2) {
         const R = 6371000;
         const φ1 = lat1 * Math.PI/180;
@@ -218,35 +188,80 @@
         return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
     }
     
+    // ----- ГЕНЕРАЦИЯ ГРИБА В РАДИУСЕ ОТ ТОЧКИ -----
+    function generateMushroomNear(lat, lng, minDist, maxDist) {
+        const dist = minDist + Math.random() * (maxDist - minDist);
+        const angle = Math.random() * 2 * Math.PI;
+        const deltaLat = (dist * Math.cos(angle)) / 111320;
+        const deltaLng = (dist * Math.sin(angle)) / (111320 * Math.cos(lat * Math.PI/180));
+        
+        let newLat = lat + deltaLat;
+        let newLng = lng + deltaLng;
+        
+        newLat = Math.min(90, Math.max(-90, newLat));
+        newLng = Math.min(180, Math.max(-180, newLng));
+        
+        // 30% шанс мухомора, 70% белый
+        const isAmanita = Math.random() < 0.3;
+        
+        return { lat: newLat, lng: newLng, type: isAmanita ? 'amanita' : 'white' };
+    }
+    
+    // ----- ДОБАВИТЬ ГРИБ НА КАРТУ -----
+    function addMushroom(lat, lng, type) {
+        const icon = type === 'white' ? getWhiteIcon() : getAmanitaIcon();
+        const marker = L.marker([lat, lng], { icon }).addTo(map);
+        const popupText = type === 'white' ? '🟤 Белый гриб +1' : '🔴🍄 Мухомор -1';
+        marker.bindPopup(popupText);
+        mushrooms.push({ id: nextId++, marker, lat, lng, type });
+    }
+    
+    function removeMushroom(m) {
+        if (m.marker) map.removeLayer(m.marker);
+        const idx = mushrooms.findIndex(x => x.id === m.id);
+        if (idx !== -1) mushrooms.splice(idx, 1);
+    }
+    
+    // ----- ОБНОВЛЕНИЕ СТАТИСТИКИ -----
+    function updateStats() {
+        document.getElementById('totalScore').innerText = totalScore;
+        document.getElementById('whiteCount').innerText = whiteCollected;
+        document.getElementById('amanitaCount').innerText = amanitaCollected;
+    }
+    
     // ----- СБОР ГРИБОВ -----
     function collectMushrooms(lat, lng) {
         let collected = 0;
         for (let i = mushrooms.length-1; i >= 0; i--) {
             const m = mushrooms[i];
-            if (distance(lat, lng, m.lat, m.lng) <= COLLECT_RADIUS) {
+            const dist = distance(lat, lng, m.lat, m.lng);
+            if (dist <= COLLECT_RADIUS) {
                 removeMushroom(m);
                 collected++;
                 
                 if (m.type === 'white') {
-                    score++;
-                    document.getElementById('statusText').innerHTML = '🍄 +1 белый гриб!';
+                    totalScore++;
+                    whiteCollected++;
+                    document.getElementById('statusText').innerHTML = '🟤 +1 белый гриб!';
                 } else {
-                    score = Math.max(0, score - 1);
-                    document.getElementById('statusText').innerHTML = '🔴 -1 мухомор!';
+                    totalScore--;
+                    amanitaCollected++;
+                    document.getElementById('statusText').innerHTML = '🔴🍄 -1 мухомор!';
                 }
+                updateStats();
                 
-                document.getElementById('mushroomCount').innerText = score;
-                
-                // Звук
                 if (crunchAudio && audioEnabled) {
                     crunchAudio.play();
                 }
             }
         }
         
-        // Если собрали грибы — генерируем новые
         if (collected > 0 && currentLocation) {
-            replenishMushrooms(currentLocation.lat, currentLocation.lng);
+            // Сразу добавить новые грибы вместо собранных
+            for (let i = 0; i < collected; i++) {
+                const newMush = generateMushroomNear(currentLocation.lat, currentLocation.lng, MIN_DIST, MAX_DIST);
+                addMushroom(newMush.lat, newMush.lng, newMush.type);
+            }
         }
         
         if (collected > 0) {
@@ -258,13 +273,57 @@
         }
     }
     
+    // ----- ОЧИСТКА ДАЛЁКИХ ГРИБОВ И ДОБАВЛЕНИЕ НОВЫХ (таймер)-----
+    function cleanupFarMushrooms() {
+        if (!currentLocation) return;
+        
+        let removed = 0;
+        for (let i = mushrooms.length-1; i >= 0; i--) {
+            const m = mushrooms[i];
+            const dist = distance(currentLocation.lat, currentLocation.lng, m.lat, m.lng);
+            if (dist > FAR_DIST) {
+                removeMushroom(m);
+                removed++;
+            }
+        }
+        
+        // Добавить новые грибы до нужного количества
+        let needed = DESIRED_MUSHROOMS - mushrooms.length;
+        for (let i = 0; i < needed; i++) {
+            const newMush = generateMushroomNear(currentLocation.lat, currentLocation.lng, MIN_DIST, MAX_DIST);
+            addMushroom(newMush.lat, newMush.lng, newMush.type);
+        }
+        
+        if (removed > 0) {
+            console.log(`Очищено ${removed} дальних грибов, добавлено ${needed} новых`);
+        }
+    }
+    
+    // ----- СТАРТОВАЯ ГЕНЕРАЦИЯ ГРИБОВ (россыпь на 300-500 метров)-----
+    function initMushroomsWide(lat, lng) {
+        // Очищаем старые
+        for (let m of mushrooms) {
+            if (m.marker) map.removeLayer(m.marker);
+        }
+        mushrooms = [];
+        
+        // Генерируем грибы в радиусе от 50 до 500 метров
+        for (let i = 0; i < DESIRED_MUSHROOMS; i++) {
+            const range = 50 + Math.random() * START_RADIUS;
+            const newMush = generateMushroomNear(lat, lng, range, range + 30);
+            addMushroom(newMush.lat, newMush.lng, newMush.type);
+        }
+        
+        console.log(`Создано ${mushrooms.length} грибов в радиусе до ${START_RADIUS}м`);
+    }
+    
     // ----- ОБНОВЛЕНИЕ КАРТЫ И ПОЗИЦИИ -----
     function updatePlayer(lat, lng, accuracy) {
         if (playerMarker) map.removeLayer(playerMarker);
         if (accuracyCircle) map.removeLayer(accuracyCircle);
         
         playerMarker = L.marker([lat, lng], { icon: getPlayerIcon() }).addTo(map);
-        playerMarker.bindPopup(`🧑‍🌾 Вы здесь | Очков: ${score}`);
+        playerMarker.bindPopup(`🧑‍🌾 Вы здесь | Очков: ${totalScore}`);
         
         if (accuracy < 300) {
             accuracyCircle = L.circle([lat, lng], { 
@@ -283,14 +342,18 @@
         const lat = position.coords.latitude;
         const lng = position.coords.longitude;
         const accuracy = position.coords.accuracy;
-        currentLocation = { lat, lng, accuracy };
+        
+        const firstFix = !currentLocation;
+        currentLocation = { lat, lng, accuracy, timestamp: Date.now() };
         
         updatePlayer(lat, lng, accuracy);
+        
+        // Сбор грибов
         collectMushrooms(lat, lng);
         
-        // Если грибов мало — добавим
-        if (mushrooms.length < DESIRED_MUSHROOMS) {
-            replenishMushrooms(lat, lng);
+        // Если первый раз — широкая генерация
+        if (firstFix) {
+            initMushroomsWide(lat, lng);
         }
     }
     
@@ -317,10 +380,13 @@
                 );
                 onLocation(pos);
                 
-                // Заполняем грибами
-                if (mushrooms.length === 0) {
-                    replenishMushrooms(pos.coords.latitude, pos.coords.longitude);
-                }
+                // Запускаем таймер очистки дальних грибов (каждые 10 секунд)
+                if (cleanupTimer) clearInterval(cleanupTimer);
+                cleanupTimer = setInterval(() => {
+                    if (currentLocation) {
+                        cleanupFarMushrooms();
+                    }
+                }, 10000);
             },
             (err) => {
                 console.error("GPS denied:", err);
@@ -378,9 +444,9 @@
     window.onload = () => {
         initMap();
         
-        // Несколько стартовых грибов (временно, потом перезапишутся)
-        for (let i = 0; i < 5; i++) {
-            let fake = generateMushroomNear(55.751244, 37.618423);
+        // Несколько стартовых грибов для красоты (временные, потом перезапишутся)
+        for (let i = 0; i < 8; i++) {
+            let fake = generateMushroomNear(55.751244, 37.618423, 50, 400);
             addMushroom(fake.lat, fake.lng, fake.type);
         }
         
@@ -397,6 +463,11 @@
         };
         document.addEventListener('touchstart', enableAudio);
         document.addEventListener('click', enableAudio);
+    };
+    
+    window.onbeforeunload = () => {
+        if (watchId) navigator.geolocation.clearWatch(watchId);
+        if (cleanupTimer) clearInterval(cleanupTimer);
     };
 </script>
 </body>
